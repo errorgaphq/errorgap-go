@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
-	errorgap "gitlab.jgrubbs.net/jGRUBBS/errorgap-go"
+	errorgap "github.com/errorgaphq/errorgap-go"
 )
 
 // Recover wraps a handler with a panic-recovering middleware that reports

@@ -8,7 +8,7 @@ will follow in 0.2.
 ## Install
 
 ```sh
-go get gitlab.jgrubbs.net/jGRUBBS/errorgap-go
+go get github.com/errorgaphq/errorgap-go
 ```
 
 Requires Go 1.22+.
@@ -22,7 +22,7 @@ import (
     "context"
     "os"
 
-    errorgap "gitlab.jgrubbs.net/jGRUBBS/errorgap-go"
+    errorgap "github.com/errorgaphq/errorgap-go"
 )
 
 func main() {

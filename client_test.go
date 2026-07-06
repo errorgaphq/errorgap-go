@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.jgrubbs.net/jGRUBBS/errorgap-go/internal/testutil"
+	"github.com/errorgaphq/errorgap-go/internal/testutil"
 )
 
 func TestClientSyncPostsToNoticesWithCanonicalHeaders(t *testing.T) {

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	errorgap "gitlab.jgrubbs.net/jGRUBBS/errorgap-go"
-	"gitlab.jgrubbs.net/jGRUBBS/errorgap-go/internal/testutil"
-	"gitlab.jgrubbs.net/jGRUBBS/errorgap-go/stdhttp"
+	errorgap "github.com/errorgaphq/errorgap-go"
+	"github.com/errorgaphq/errorgap-go/internal/testutil"
+	"github.com/errorgaphq/errorgap-go/stdhttp"
 )
 
 func TestRecoverNotifiesOnPanic(t *testing.T) {
