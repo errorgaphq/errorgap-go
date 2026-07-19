@@ -36,8 +36,7 @@ type NoticeOptions struct {
 }
 
 func buildNotice(err error, cfg *Config, opts NoticeOptions) Notice {
-	rootDir, _ := getRootDirectory()
-	frames := captureBacktrace(opts.BacktraceSkip+2, rootDir)
+	frames := captureBacktrace(opts.BacktraceSkip+2, cfg.RootDirectory)
 
 	context := map[string]any{
 		"notifier":         "errorgap-go",
@@ -46,6 +45,9 @@ func buildNotice(err error, cfg *Config, opts NoticeOptions) Notice {
 	}
 	if cfg.Release != "" {
 		context["release"] = cfg.Release
+	}
+	if cfg.RootDirectory != "" {
+		context["root_directory"] = cfg.RootDirectory
 	}
 	for k, v := range opts.Context {
 		context[k] = v

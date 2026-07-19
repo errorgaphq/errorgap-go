@@ -73,4 +73,14 @@ func TestBuildNoticeBacktrace(t *testing.T) {
 		!strings.Contains(top.Function, "TestBuildNoticeBacktrace") {
 		t.Errorf("backtrace top function = %q", top.Function)
 	}
+	foundSource := false
+	for _, frame := range n.Errors[0].Backtrace {
+		if frame.Source != nil && len(frame.Source.Lines) > 0 {
+			foundSource = true
+			break
+		}
+	}
+	if !foundSource {
+		t.Fatal("expected source excerpt on a readable frame")
+	}
 }

@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Result records the outcome of a single Notify call.
@@ -28,9 +31,15 @@ func (r Result) Success() bool {
 type Client struct {
 	mu       sync.RWMutex
 	cfg      Config
-	queue    chan Notice
+	queue    chan delivery
 	wg       sync.WaitGroup
 	stopOnce sync.Once
+	inFlight atomic.Int64
+}
+
+type delivery struct {
+	resource string
+	payload  any
 }
 
 // NewClient validates the config, applies defaults, and starts the async
@@ -41,7 +50,7 @@ func NewClient(cfg Config) (*Client, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	c := &Client{cfg: cfg, queue: make(chan Notice, cfg.QueueSize)}
+	c := &Client{cfg: cfg, queue: make(chan delivery, cfg.QueueSize)}
 	if cfg.Async {
 		c.wg.Add(1)
 		go c.loop()
@@ -71,19 +80,62 @@ func (c *Client) Notify(err error, opts ...NoticeOptions) Result {
 	c.mu.RUnlock()
 
 	notice := buildNotice(err, &cfg, o)
+	return c.submit(delivery{resource: "notices", payload: notice})
+}
 
-	if !cfg.Async {
-		return c.deliver(context.Background(), notice)
+// NotifyTransaction sends an APM transaction when APM is enabled and the
+// configured sample rate accepts it.
+func (c *Client) NotifyTransaction(transaction Transaction) Result {
+	c.mu.RLock()
+	cfg := c.cfg
+	c.mu.RUnlock()
+	if !cfg.APMEnabled || cfg.APMSampleRate <= 0 || (cfg.APMSampleRate < 1 && rand.Float64() >= cfg.APMSampleRate) {
+		return Result{Status: http.StatusNoContent}
 	}
+	if transaction.Environment == "" {
+		transaction.Environment = cfg.Environment
+	}
+	if transaction.Kind == "" {
+		transaction.Kind = "web"
+	}
+	if transaction.OccurredAt.IsZero() {
+		transaction.OccurredAt = time.Now().UTC()
+	}
+	if transaction.Spans == nil {
+		transaction.Spans = []Span{}
+	}
+	return c.submit(delivery{resource: "transactions", payload: transaction})
+}
 
+// NotifyLog sends one structured log event when log forwarding is enabled.
+func (c *Client) NotifyLog(message, level, source string) Result {
+	c.mu.RLock()
+	cfg := c.cfg
+	c.mu.RUnlock()
+	if !cfg.LogsEnabled {
+		return Result{Status: http.StatusNoContent}
+	}
+	payload := LogEntry{
+		Message: message, Level: normalizeLogLevel(level), Source: source,
+		Environment: cfg.Environment, OccurredAt: time.Now().UTC(),
+	}
+	return c.submit(delivery{resource: "logs", payload: payload})
+}
+
+func (c *Client) submit(item delivery) Result {
+	c.mu.RLock()
+	cfg := c.cfg
+	c.mu.RUnlock()
+	if !cfg.Async {
+		return c.deliver(context.Background(), item)
+	}
+	c.inFlight.Add(1)
 	select {
-	case c.queue <- notice:
-		return Result{Status: 202, Queued: true}
+	case c.queue <- item:
+		return Result{Status: http.StatusAccepted, Queued: true}
 	default:
-		// Queue full — drop the new notice rather than blocking. Logs a
-		// warning so operators can size QueueSize up.
-		cfg.Logger.Warn("errorgap: notice dropped, queue full",
-			"queue_size", cfg.QueueSize)
+		c.inFlight.Add(-1)
+		cfg.Logger.Warn("errorgap: item dropped, queue full", "queue_size", cfg.QueueSize)
 		return Result{Err: fmt.Errorf("errorgap: queue full")}
 	}
 }
@@ -96,18 +148,17 @@ func (c *Client) Flush(ctx context.Context) error {
 	if !async {
 		return nil
 	}
-	done := make(chan struct{})
-	go func() {
-		for len(c.queue) > 0 {
-			// busy wait briefly; sleep handled by select below
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if len(c.queue) == 0 && c.inFlight.Load() == 0 {
+			return nil
 		}
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 }
 
@@ -129,19 +180,20 @@ func (c *Client) Close(ctx context.Context) error {
 
 func (c *Client) loop() {
 	defer c.wg.Done()
-	for notice := range c.queue {
-		c.deliver(context.Background(), notice)
+	for item := range c.queue {
+		c.deliver(context.Background(), item)
+		c.inFlight.Add(-1)
 	}
 }
 
-func (c *Client) deliver(ctx context.Context, notice Notice) Result {
-	body, err := json.Marshal(notice)
+func (c *Client) deliver(ctx context.Context, item delivery) Result {
+	body, err := json.Marshal(item.payload)
 	if err != nil {
 		c.cfg.Logger.Warn("errorgap: failed to encode notice", "err", err)
 		return Result{Err: err}
 	}
 
-	url := fmt.Sprintf("%s/api/projects/%s/notices", trimTrailingSlash(c.cfg.Endpoint), c.cfg.ProjectSlug)
+	url := fmt.Sprintf("%s/api/projects/%s/%s", trimTrailingSlash(c.cfg.Endpoint), c.cfg.ProjectSlug, item.resource)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		c.cfg.Logger.Warn("errorgap: failed to build request", "err", err)

@@ -2,6 +2,7 @@ package errorgap
 
 import (
 	"errors"
+	"log/slog"
 	"testing"
 )
 
@@ -26,6 +27,15 @@ func TestConfigDefaults(t *testing.T) {
 	if cfg.QueueSize != 100 {
 		t.Errorf("QueueSize default = %d, want 100", cfg.QueueSize)
 	}
+	if cfg.RootDirectory == "" {
+		t.Error("RootDirectory default should be non-empty")
+	}
+	if cfg.APMSampleRate != 1 {
+		t.Errorf("APMSampleRate default = %v, want 1", cfg.APMSampleRate)
+	}
+	if cfg.MinimumLogLevel != slog.LevelWarn {
+		t.Errorf("MinimumLogLevel = %v, want warn", cfg.MinimumLogLevel)
+	}
 }
 
 func TestConfigEnvOverrides(t *testing.T) {
@@ -33,6 +43,10 @@ func TestConfigEnvOverrides(t *testing.T) {
 	t.Setenv("ERRORGAP_PROJECT_SLUG", "demo")
 	t.Setenv("ERRORGAP_PROJECT_ID", "p_123")
 	t.Setenv("ERRORGAP_API_KEY", "flk_test")
+	t.Setenv("ERRORGAP_APM_ENABLED", "true")
+	t.Setenv("ERRORGAP_APM_SAMPLE_RATE", "0.5")
+	t.Setenv("ERRORGAP_LOGS_ENABLED", "true")
+	t.Setenv("ERRORGAP_MINIMUM_LOG_LEVEL", "ERROR")
 
 	cfg := Config{}
 	cfg.applyDefaults()
@@ -45,6 +59,12 @@ func TestConfigEnvOverrides(t *testing.T) {
 	}
 	if cfg.APIKey != "flk_test" {
 		t.Errorf("APIKey = %q", cfg.APIKey)
+	}
+	if !cfg.APMEnabled || cfg.APMSampleRate != 0.5 || !cfg.LogsEnabled {
+		t.Errorf("telemetry env defaults not applied: %+v", cfg)
+	}
+	if cfg.MinimumLogLevel != slog.LevelError {
+		t.Errorf("MinimumLogLevel = %v, want error", cfg.MinimumLogLevel)
 	}
 }
 

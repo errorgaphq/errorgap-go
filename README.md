@@ -1,9 +1,9 @@
 # errorgap-go
 
-Go notifier for [Errorgap](https://errorgap.com). Captures errors and
-panics, walks the goroutine stack, and ships notices to an Errorgap
-server. Ships a net/http recovery middleware; gin/chi/echo/fiber adapters
-will follow in 0.2.
+Go notifier for [Errorgap](https://errorgap.com). Captures errors and panics,
+embeds application and dependency source excerpts, instruments `net/http`
+requests and background jobs for APM, and forwards standard-library `slog`
+records.
 
 ## Install
 
@@ -31,6 +31,8 @@ func main() {
         ProjectSlug: os.Getenv("ERRORGAP_PROJECT_SLUG"),
         APIKey:      os.Getenv("ERRORGAP_API_KEY"),
         Environment: os.Getenv("APP_ENV"),
+        APMEnabled:  true,
+        LogsEnabled: true,
     })
     if err != nil {
         panic(err)
@@ -58,15 +60,54 @@ if err := risky(); err != nil {
 `Notify` returns a `Result` (`{Status, Body, Err, Queued}`). The SDK never
 panics — recoverable failures are logged via the configured `slog.Logger`.
 
-## net/http
+## net/http errors and APM
 
 ```go
 mux := http.NewServeMux()
-mux.HandleFunc("/", handler)
+mux.Handle("GET /orders/{orderId}",
+    stdhttp.Route("/orders/{orderId}", http.HandlerFunc(handler)))
 http.ListenAndServe(":8080", stdhttp.Recover(mux))
 ```
 
-The middleware catches panics, reports them, and returns a 500 response.
+The middleware catches panics, reports them, returns a 500 response, and sends
+request duration, status, raw path, and normalized route statistics. On Go
+versions that expose the matched `ServeMux` pattern, `stdhttp.Route` is
+optional; keeping it makes normalized paths work on Go 1.22 too.
+
+Record database and outbound HTTP work against the request context:
+
+```go
+started := time.Now()
+rows, err := db.QueryContext(r.Context(), "SELECT * FROM orders WHERE id = ?", id)
+errorgap.RecordDatabase(r.Context(), "SELECT * FROM orders WHERE id = 42", time.Since(started))
+
+started = time.Now()
+response, err := http.DefaultClient.Do(request)
+errorgap.RecordExternal(r.Context(), time.Since(started))
+```
+
+SQL literals are normalized before delivery so equivalent queries aggregate.
+
+## Background jobs
+
+```go
+err := errorgap.TrackJob(ctx, "ReceiptJob", "critical", func(ctx context.Context) error {
+    errorgap.RecordDatabase(ctx, "SELECT 42 AS receipt", 5*time.Millisecond)
+    return generateReceipt(ctx)
+})
+```
+
+Failed jobs send both an error notice and a failed job transaction.
+
+## slog forwarding
+
+```go
+handler := errorgap.NewSlogHandler(slog.NewJSONHandler(os.Stdout, nil), nil, slog.LevelWarn)
+logger := slog.New(handler)
+logger.Warn("payment gateway timeout", "order_id", orderID)
+```
+
+Pass a `*Client` instead of `nil` when not using the package-level client.
 
 ## Recover helper
 
@@ -101,11 +142,16 @@ _ = errorgap.Close(ctx) // shut down the worker goroutine
 | `APIKey` | `ERRORGAP_API_KEY` | Sent as `x-errorgap-project-key` |
 | `Environment` | `ERRORGAP_ENVIRONMENT` or `"production"` | |
 | `Release` | — | Embedded in `context.release` |
+| `RootDirectory` | current directory | Classifies app frames and makes their paths relative |
 | `Async` | `true` (via `Init`) | Background goroutine delivery |
-| `Logger` | `slog.New(...io.Discard)` | Replace to surface SDK warnings |
+| `Logger` | discard logger | Replace to surface SDK diagnostics |
 | `FilterKeys` | `["password", "token", ...]` | Substring, case-insensitive |
 | `HTTPClient` | `&http.Client{Timeout: 5s}` | Plug in your own transport |
-| `QueueSize` | `100` | Drops oldest notice when full |
+| `QueueSize` | `100` | Drops the new telemetry item when full |
+| `APMEnabled` | `ERRORGAP_APM_ENABLED` or `false` | Sends requests, spans, and jobs |
+| `APMSampleRate` | `ERRORGAP_APM_SAMPLE_RATE` or `1` | Fraction from 0 to 1 |
+| `LogsEnabled` | `ERRORGAP_LOGS_ENABLED` or `false` | Enables `NotifyLog` and `SlogHandler` delivery |
+| `MinimumLogLevel` | `ERRORGAP_MINIMUM_LOG_LEVEL` or `WARN` | Threshold used by `NewSlogHandler` |
 
 ## Verify
 

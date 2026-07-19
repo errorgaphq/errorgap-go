@@ -9,6 +9,7 @@ package errorgap
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 )
 
@@ -21,14 +22,13 @@ var (
 // replace the existing default. The previous client is closed in the
 // background so in-flight deliveries still finish.
 func Init(cfg Config) error {
-	// Default Async to true when not explicitly set. Because the zero
-	// value of bool is false, we detect "user opted out" by looking for
-	// an explicit Async field — but we can't, so we instead document that
-	// Async defaults to true via Init and require Configure for tests.
-	if !cfg.Async {
-		// Treat zero value as "use the default". Callers who really want
-		// sync delivery should set Async=false AND pass true to
-		// NoSyncDelivery (see NewClient docs). For Init, we apply true.
+	// Default Async to true because bool's zero value cannot distinguish an
+	// omitted setting. ERRORGAP_ASYNC=false provides an explicit synchronous
+	// package-level mode; callers can also use NewClient with Async false.
+	if value, ok := os.LookupEnv("ERRORGAP_ASYNC"); ok {
+		cfg.Async = parseBool(value, cfg.Async)
+	} else if !cfg.Async {
+		// Treat the zero value as "use the package default".
 		cfg.Async = true
 	}
 	c, err := NewClient(cfg)
@@ -45,6 +45,33 @@ func Init(cfg Config) error {
 		}()
 	}
 	return nil
+}
+
+// NotifyTransaction sends an APM transaction via the package-level client.
+func NotifyTransaction(transaction Transaction) Result {
+	c := getDefault()
+	if c == nil {
+		return Result{Err: errors.New("errorgap: not initialized")}
+	}
+	return c.NotifyTransaction(transaction)
+}
+
+// NotifyLog sends a structured log event via the package-level client.
+func NotifyLog(message, level, source string) Result {
+	c := getDefault()
+	if c == nil {
+		return Result{Err: errors.New("errorgap: not initialized")}
+	}
+	return c.NotifyLog(message, level, source)
+}
+
+// TrackJob runs operation as a background job using the package-level client.
+func TrackJob(ctx context.Context, jobClass, queue string, operation func(context.Context) error) error {
+	c := getDefault()
+	if c == nil {
+		return errors.New("errorgap: not initialized")
+	}
+	return c.TrackJob(ctx, jobClass, queue, operation)
 }
 
 // Notify sends an error via the package-level client. Returns an empty

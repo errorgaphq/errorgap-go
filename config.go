@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,10 +47,15 @@ type Config struct {
 	// Release is the application version embedded in the notice context.
 	Release string
 
+	// RootDirectory is used to classify application frames and make their
+	// filenames relative. Defaults to $ERRORGAP_ROOT_DIRECTORY or the current
+	// working directory.
+	RootDirectory string
+
 	// Async controls fire-and-forget delivery. Defaults to true.
 	Async bool
 
-	// Logger receives SDK warnings. Defaults to slog.Default().
+	// Logger receives SDK warnings. Defaults to a discard logger.
 	// Set to a no-op handler to silence.
 	Logger *slog.Logger
 
@@ -64,13 +70,29 @@ type Config struct {
 	Timeout time.Duration
 
 	// QueueSize bounds the in-flight notice channel when Async is true.
-	// Drops oldest in-flight notice when full. Defaults to 100.
+	// Drops the new item when full. Defaults to 100.
 	QueueSize int
 
 	// CaptureGlobals installs a recover-and-log hook at the entry point.
 	// (Go doesn't allow process-wide panic handlers; use the middleware
 	// adapters instead.) Currently unused; reserved for future use.
 	CaptureGlobals bool
+
+	// APMEnabled controls transaction delivery. Defaults to
+	// $ERRORGAP_APM_ENABLED or false.
+	APMEnabled bool
+
+	// APMSampleRate is the fraction of transactions to send, from 0 to 1.
+	// Defaults to $ERRORGAP_APM_SAMPLE_RATE or 1.
+	APMSampleRate float64
+
+	// LogsEnabled controls structured log delivery. Defaults to
+	// $ERRORGAP_LOGS_ENABLED or false.
+	LogsEnabled bool
+
+	// MinimumLogLevel is used by NewSlogHandler. Defaults to
+	// $ERRORGAP_MINIMUM_LOG_LEVEL or slog.LevelWarn.
+	MinimumLogLevel slog.Level
 }
 
 func (c *Config) applyDefaults() {
@@ -89,6 +111,12 @@ func (c *Config) applyDefaults() {
 	if c.Environment == "" {
 		c.Environment = firstNonEmpty(os.Getenv("ERRORGAP_ENVIRONMENT"), "production")
 	}
+	if c.RootDirectory == "" {
+		c.RootDirectory = os.Getenv("ERRORGAP_ROOT_DIRECTORY")
+		if c.RootDirectory == "" {
+			c.RootDirectory, _ = getRootDirectory()
+		}
+	}
 	if c.Logger == nil {
 		c.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -104,9 +132,50 @@ func (c *Config) applyDefaults() {
 	if c.QueueSize <= 0 {
 		c.QueueSize = 100
 	}
+	if value, ok := os.LookupEnv("ERRORGAP_APM_ENABLED"); ok {
+		c.APMEnabled = parseBool(value, c.APMEnabled)
+	}
+	if value, ok := os.LookupEnv("ERRORGAP_LOGS_ENABLED"); ok {
+		c.LogsEnabled = parseBool(value, c.LogsEnabled)
+	}
+	if c.APMSampleRate == 0 {
+		c.APMSampleRate = 1
+		if value := os.Getenv("ERRORGAP_APM_SAMPLE_RATE"); value != "" {
+			if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+				c.APMSampleRate = parsed
+			}
+		}
+	}
+	if c.APMSampleRate < 0 {
+		c.APMSampleRate = 0
+	}
+	if c.APMSampleRate > 1 {
+		c.APMSampleRate = 1
+	}
+	if value := os.Getenv("ERRORGAP_MINIMUM_LOG_LEVEL"); value != "" {
+		c.MinimumLogLevel = parseLogLevel(value)
+	} else if c.MinimumLogLevel == 0 {
+		c.MinimumLogLevel = slog.LevelWarn
+	}
 	// Async defaults to true unless explicitly overridden. Since the zero
 	// value of bool is false, callers MUST set Async=true explicitly OR
 	// use the Init helper which preserves the intended default.
+}
+
+func parseBool(value string, fallback bool) bool {
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func parseLogLevel(value string) slog.Level {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(value)); err == nil {
+		return level
+	}
+	return slog.LevelWarn
 }
 
 func (c *Config) validate() error {
