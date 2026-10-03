@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,5 +98,66 @@ func TestSlogHandlerForwardsOnlyMinimumLevel(t *testing.T) {
 	requests := ing.Requests()
 	if len(requests) != 1 || requests[0].Body["message"] != "forwarded" {
 		t.Fatalf("log requests = %+v", requests)
+	}
+}
+
+func TestTrackJobLinksItsErrorAndContext(t *testing.T) {
+	t.Setenv("ERRORGAP_ASYNC", "false")
+	ing := testutil.NewIngestor(201)
+	defer ing.Close()
+	client, err := NewClient(Config{
+		Endpoint: ing.Endpoint(), ProjectSlug: "demo", APIKey: "egp_test",
+		Async: false, APMEnabled: true, APMSampleRate: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close(context.Background())
+
+	var seen string
+	_ = client.TrackJob(context.Background(), "ReceiptJob", "mailers", func(ctx context.Context) error {
+		seen = TransactionIDFromContext(ctx)
+		return errors.New("smtp down")
+	})
+	_ = client.Flush(context.Background())
+	if len(ing.Requests()) != 2 {
+		t.Fatalf("want a notice and a transaction, got %d requests", len(ing.Requests()))
+	}
+	if len(seen) != 36 {
+		t.Fatalf("job context transaction id = %q", seen)
+	}
+	for _, req := range ing.Requests() {
+		if strings.HasSuffix(req.Path, "/transactions") {
+			if req.Body["id"] != seen {
+				t.Errorf("transaction id = %v, want %s", req.Body["id"], seen)
+			}
+			continue
+		}
+		ctx, _ := req.Body["context"].(map[string]any)
+		if ctx["transaction_id"] != seen {
+			t.Errorf("notice transaction_id = %v, want %s", ctx["transaction_id"], seen)
+		}
+	}
+}
+
+func TestNotifyContextWithoutATransactionAddsNothing(t *testing.T) {
+	t.Setenv("ERRORGAP_ASYNC", "false")
+	ing := testutil.NewIngestor(201)
+	defer ing.Close()
+	client, err := NewClient(Config{
+		Endpoint: ing.Endpoint(), ProjectSlug: "demo", APIKey: "egp_test", Async: false,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close(context.Background())
+	client.NotifyContext(context.Background(), errors.New("boot"))
+	_ = client.Flush(context.Background())
+	ctx, _ := ing.Requests()[0].Body["context"].(map[string]any)
+	if _, set := ctx["transaction_id"]; set {
+		t.Errorf("transaction_id set without a transaction: %v", ctx["transaction_id"])
+	}
+	if id := NewTransactionID(); len(id) != 36 || id[14] != '4' {
+		t.Errorf("NewTransactionID = %q, want a v4 uuid", id)
 	}
 }

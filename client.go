@@ -83,6 +83,21 @@ func (c *Client) Notify(err error, opts ...NoticeOptions) Result {
 	return c.submit(delivery{resource: "notices", payload: notice})
 }
 
+// NotifyContext is Notify for code running inside a transaction: the error
+// carries the transaction id ctx holds (see WithTransactionID), which links it
+// to its request or job in errorgap.
+func (c *Client) NotifyContext(ctx context.Context, err error, opts ...NoticeOptions) Result {
+	var o NoticeOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	if o.TransactionID == "" {
+		o.TransactionID = TransactionIDFromContext(ctx)
+	}
+	o.BacktraceSkip++
+	return c.Notify(err, o)
+}
+
 // NotifyTransaction sends an APM transaction when APM is enabled and the
 // configured sample rate accepts it.
 func (c *Client) NotifyTransaction(transaction Transaction) Result {

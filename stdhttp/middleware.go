@@ -19,7 +19,11 @@ func Recover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		route := &routeState{}
+		// Handlers report with errorgap.NotifyContext(r.Context(), err) and
+		// the error carries this request's transaction id.
+		transactionID := errorgap.NewTransactionID()
 		ctx := context.WithValue(r.Context(), routeStateKey{}, route)
+		ctx = errorgap.WithTransactionID(ctx, transactionID)
 		ctx, collector := errorgap.WithSpanCollector(ctx)
 		r = r.WithContext(ctx)
 		writer := &statusWriter{ResponseWriter: w, status: http.StatusOK}
@@ -45,12 +49,14 @@ func Recover(next http.Handler) http.Handler {
 					Session:       map[string]any{"request_id": r.Header.Get("x-request-id")},
 					Params:        requestParams(r),
 					BacktraceSkip: 1,
+					TransactionID: transactionID,
 				})
 				if !writer.wroteHeader {
 					writer.WriteHeader(status)
 				}
 			}
 			errorgap.NotifyTransaction(errorgap.Transaction{
+				ID:   transactionID,
 				Kind: "web", Method: r.Method, Path: normalizedRoute(r), PathRaw: r.URL.Path,
 				StatusCode: status, DurationMS: float64(time.Since(started)) / float64(time.Millisecond),
 				OccurredAt: started.UTC(), Spans: collector.Spans(),

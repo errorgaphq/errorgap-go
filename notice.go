@@ -33,6 +33,10 @@ type NoticeOptions struct {
 	// Skip extra runtime.Caller frames when capturing the backtrace.
 	// Useful when Notify is wrapped by another helper.
 	BacktraceSkip int
+
+	// TransactionID is the APM transaction the error was raised in, sent as
+	// context.transaction_id. NotifyContext fills it from the context.
+	TransactionID string
 }
 
 func buildNotice(err error, cfg *Config, opts NoticeOptions) Notice {
@@ -51,6 +55,9 @@ func buildNotice(err error, cfg *Config, opts NoticeOptions) Notice {
 	}
 	for k, v := range opts.Context {
 		context[k] = v
+	}
+	if _, set := context["transaction_id"]; !set && opts.TransactionID != "" {
+		context["transaction_id"] = opts.TransactionID
 	}
 
 	return Notice{
