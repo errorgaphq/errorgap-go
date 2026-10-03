@@ -84,6 +84,21 @@ func Notify(err error, opts ...NoticeOptions) Result {
 	return c.Notify(err, opts...)
 }
 
+// NotifyContext sends an error via the package-level client, carrying the
+// transaction id ctx holds (see WithTransactionID).
+func NotifyContext(ctx context.Context, err error, opts ...NoticeOptions) Result {
+	c := getDefault()
+	if c == nil {
+		return Result{Err: errors.New("errorgap: not initialized")}
+	}
+	var o NoticeOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	o.BacktraceSkip++
+	return c.NotifyContext(ctx, err, o)
+}
+
 // Flush blocks until in-flight async deliveries finish.
 func Flush(ctx context.Context) error {
 	c := getDefault()

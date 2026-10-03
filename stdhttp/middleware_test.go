@@ -2,6 +2,7 @@ package stdhttp_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -107,4 +108,62 @@ func TestRecoverRecordsNormalizedRouteAPMAndFilteredRequest(t *testing.T) {
 	if len(transaction["spans"].([]any)) != 1 {
 		t.Errorf("spans = %+v", transaction["spans"])
 	}
+}
+
+// Errors reported inside a request carry its transaction id, so errorgap shows
+// the error the request raised and links the occurrence to its trace.
+func TestRecoverLinksTheRequestAndItsErrors(t *testing.T) {
+	t.Setenv("ERRORGAP_ASYNC", "false")
+	ing := testutil.NewIngestor(201)
+	defer ing.Close()
+	if err := errorgap.Init(errorgap.Config{
+		Endpoint: ing.Endpoint(), ProjectSlug: "demo", APIKey: "egp_test",
+		Async: false, APMEnabled: true, APMSampleRate: 1,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer errorgap.Close(context.Background())
+
+	app := stdhttp.Recover(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		errorgap.NotifyContext(r.Context(), errors.New("card declined"))
+		panic("kaboom")
+	}))
+	app.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/orders/7", nil))
+	_ = errorgap.Flush(context.Background())
+
+	var handled, panicked, transaction map[string]any
+	for _, req := range ing.Requests() {
+		body := req.Body
+		switch {
+		case strings.HasSuffix(req.Path, "/transactions"):
+			transaction = body
+		case errorMessage(body) == "card declined":
+			handled = body
+		default:
+			panicked = body
+		}
+	}
+	if transaction == nil || handled == nil || panicked == nil {
+		t.Fatalf("missing deliveries: %+v", ing.Requests())
+	}
+	id, _ := transaction["id"].(string)
+	if len(id) != 36 {
+		t.Fatalf("transaction id = %q", id)
+	}
+	for name, notice := range map[string]map[string]any{"handled": handled, "panic": panicked} {
+		ctx, _ := notice["context"].(map[string]any)
+		if ctx["transaction_id"] != id {
+			t.Errorf("%s notice transaction_id = %v, want %s", name, ctx["transaction_id"], id)
+		}
+	}
+}
+
+func errorMessage(notice map[string]any) string {
+	errs, _ := notice["errors"].([]any)
+	if len(errs) == 0 {
+		return ""
+	}
+	first, _ := errs[0].(map[string]any)
+	message, _ := first["message"].(string)
+	return message
 }

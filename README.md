@@ -99,6 +99,26 @@ err := errorgap.TrackJob(ctx, "ReceiptJob", "critical", func(ctx context.Context
 
 Failed jobs send both an error notice and a failed job transaction.
 
+## Link errors to their request
+
+`stdhttp.Recover` and `TrackJob` give each request or job a transaction id and
+put it on the context they pass down. Report from handlers with
+`NotifyContext` and the error carries it as `context.transaction_id`, so
+errorgap shows the error a request actually raised on its trace and links each
+occurrence to its request (panics caught by `Recover` carry it automatically):
+
+```go
+func handler(w http.ResponseWriter, r *http.Request) {
+	if err := chargeCard(r.Context()); err != nil {
+		errorgap.NotifyContext(r.Context(), err)
+		http.Error(w, "payment failed", http.StatusBadGateway)
+	}
+}
+```
+
+For your own instrumentation, `errorgap.NewTransactionID()`,
+`errorgap.WithTransactionID(ctx, id)` and `Transaction{ID: id, ...}` do the same.
+
 ## slog forwarding
 
 ```go
