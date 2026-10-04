@@ -101,6 +101,11 @@ Failed jobs send both an error notice and a failed job transaction.
 
 ## Link errors to their request
 
+When the errorgap browser SDK is on the page, its API calls send an
+`x-errorgap-trace` header. `stdhttp.Recover` records it as the transaction's
+`TraceID` (validate your own with `errorgap.BrowserTraceID`), so errorgap's
+browser Performance view links each call to the server request that answered it.
+
 `stdhttp.Recover` and `TrackJob` give each request or job a transaction id and
 put it on the context they pass down. Report from handlers with
 `NotifyContext` and the error carries it as `context.transaction_id`, so

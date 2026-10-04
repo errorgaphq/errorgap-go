@@ -158,6 +158,37 @@ func TestRecoverLinksTheRequestAndItsErrors(t *testing.T) {
 	}
 }
 
+func TestRecoverRecordsTheBrowserTraceHeader(t *testing.T) {
+	t.Setenv("ERRORGAP_ASYNC", "false")
+	ing := testutil.NewIngestor(201)
+	defer ing.Close()
+	if err := errorgap.Init(errorgap.Config{
+		Endpoint: ing.Endpoint(), ProjectSlug: "demo", APIKey: "egp_test",
+		Async: false, APMEnabled: true, APMSampleRate: 1,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer errorgap.Close(context.Background())
+
+	app := stdhttp.Recover(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	for _, header := range []string{"0192F3C4-7A1B-4C2D-9E3F-0123456789AB", "not-a-uuid"} {
+		req := httptest.NewRequest(http.MethodGet, "/orders/7", nil)
+		req.Header.Set("x-errorgap-trace", header)
+		app.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	_ = errorgap.Flush(context.Background())
+
+	var traces []any
+	for _, req := range ing.Requests() {
+		if strings.HasSuffix(req.Path, "/transactions") {
+			traces = append(traces, req.Body["trace_id"])
+		}
+	}
+	if len(traces) != 2 || traces[0] != "0192f3c4-7a1b-4c2d-9e3f-0123456789ab" || traces[1] != nil {
+		t.Fatalf("trace ids = %v", traces)
+	}
+}
+
 func errorMessage(notice map[string]any) string {
 	errs, _ := notice["errors"].([]any)
 	if len(errs) == 0 {
