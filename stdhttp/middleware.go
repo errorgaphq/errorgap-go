@@ -56,8 +56,9 @@ func Recover(next http.Handler) http.Handler {
 				}
 			}
 			errorgap.NotifyTransaction(errorgap.Transaction{
-				ID:   transactionID,
-				Kind: "web", Method: r.Method, Path: normalizedRoute(r), PathRaw: r.URL.Path,
+				ID:      transactionID,
+				TraceID: errorgap.BrowserTraceID(r.Header.Get(errorgap.TraceHeader)),
+				Kind:    "web", Method: r.Method, Path: normalizedRoute(r), PathRaw: r.URL.Path,
 				StatusCode: status, DurationMS: float64(time.Since(started)) / float64(time.Millisecond),
 				OccurredAt: started.UTC(), Spans: collector.Spans(),
 			})
