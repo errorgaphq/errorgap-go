@@ -60,6 +60,31 @@ if err := risky(); err != nil {
 `Notify` returns a `Result` (`{Status, Body, Err, Queued}`). The SDK never
 panics — recoverable failures are logged via the configured `slog.Logger`.
 
+## Filtering, hooks and delivery
+
+```go
+errorgap.Init(errorgap.Config{
+    ProjectSlug:        "my-app",
+    IgnoreEnvironments: []string{"test"},
+    BeforeNotify: func(n *errorgap.Notice) bool {
+        if n.Errors[0].Type == "NotFoundError" {
+            return false // drop it
+        }
+        n.Context["team"] = "billing" // or change it
+        return true
+    },
+})
+```
+
+`FilterKeys` are masked at any depth in `Params` and `Session`, inside slices
+too, and oversized values are cut. Errors wrapped with `%w` are reported with
+their chain (`context.causes`). A send that fails on the network or with a 5xx
+is retried up to three times; after a 429 the client stops sending for the
+server's `Retry-After` (`client.Paused()`).
+
+With `Release` empty it is read from `ERRORGAP_RELEASE`, the hosting platform's
+commit variable, or the VCS revision `go build` stamps into the binary.
+
 ## net/http errors and APM
 
 ```go
