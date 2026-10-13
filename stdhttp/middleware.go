@@ -81,6 +81,25 @@ func Route(pattern string, next http.Handler) http.Handler {
 	})
 }
 
+// SetRoute names the route pattern of a request that is running inside
+// Recover, from code that knows it: a router's own middleware, for example.
+// With chi:
+//
+//	r.Use(stdhttp.Recover)
+//	r.Use(func(next http.Handler) http.Handler {
+//		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+//			next.ServeHTTP(w, req)
+//			stdhttp.SetRoute(req, chi.RouteContext(req.Context()).RoutePattern())
+//		})
+//	})
+//
+// It does nothing when the request is not inside Recover.
+func SetRoute(r *http.Request, pattern string) {
+	if state, _ := r.Context().Value(routeStateKey{}).(*routeState); state != nil && pattern != "" {
+		state.pattern = pattern
+	}
+}
+
 type statusWriter struct {
 	http.ResponseWriter
 	status      int

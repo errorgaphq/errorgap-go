@@ -113,6 +113,43 @@ errorgap.RecordExternal(r.Context(), time.Since(started))
 
 SQL literals are normalized before delivery so equivalent queries aggregate.
 
+## Gin, Echo and other routers
+
+Gin and Echo have their own modules, so the core module stays free of
+dependencies:
+
+```go
+import errorgapgin "github.com/errorgaphq/errorgap-go/gin"
+
+r := gin.New()
+r.Use(gin.Recovery(), errorgapgin.Middleware())
+```
+
+```go
+import errorgapecho "github.com/errorgaphq/errorgap-go/echo"
+
+e := echo.New()
+e.Use(middleware.Recover(), errorgapecho.Middleware())
+```
+
+Both report panics and 5xx handler errors, and record each request as a
+transaction named by its route (`/orders/:id`). Register them after the
+framework's own recovery middleware.
+
+chi, gorilla/mux, httprouter and anything else built on `net/http` work with
+`stdhttp.Recover`; name the route with `stdhttp.SetRoute` where the router
+knows it:
+
+```go
+r.Use(stdhttp.Recover)
+r.Use(func(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+        next.ServeHTTP(w, req)
+        stdhttp.SetRoute(req, chi.RouteContext(req.Context()).RoutePattern())
+    })
+})
+```
+
 ## Background jobs
 
 ```go
@@ -213,6 +250,11 @@ curl -sS -X POST "$ERRORGAP_ENDPOINT/api/projects/$ERRORGAP_PROJECT_SLUG/notices
 ```
 
 Then trigger a real error and confirm it appears in the Errorgap UI.
+
+## Releasing
+
+The adapters are nested modules and are tagged separately, after the core:
+`v0.5.0`, then `gin/v0.5.0` and `echo/v0.5.0`.
 
 ## Development
 
