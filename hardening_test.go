@@ -24,6 +24,10 @@ func newStub(t *testing.T, status int, headers map[string]string) *stub {
 	t.Helper()
 	s := &stub{}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet { // the settings poll, not an ingest request
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)

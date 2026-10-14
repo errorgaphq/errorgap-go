@@ -113,6 +113,15 @@ errorgap.RecordExternal(r.Context(), time.Since(started))
 
 SQL literals are normalized before delivery so equivalent queries aggregate.
 
+## Remote settings
+
+Errors, transactions and logs can each be switched off for a project in
+errorgap (Project settings › What SDKs send). Running apps follow within ten
+minutes, with no deploy: the client re-reads `GET /api/projects/:slug/config`
+in the background. If errorgap cannot be reached, everything stays on.
+`DisableRemoteSettings: true` (or `ERRORGAP_REMOTE_SETTINGS=false`) ignores the
+project's switches.
+
 ## Gin, Echo and other routers
 
 Gin and Echo have their own modules, so the core module stays free of

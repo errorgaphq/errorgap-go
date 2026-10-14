@@ -43,6 +43,7 @@ type Client struct {
 	// pausedUntil is a unix-nano time: sending is paused until then after a
 	// 429 or 503 (Retry-After).
 	pausedUntil atomic.Int64
+	remote      remoteSettings
 }
 
 type delivery struct {
@@ -100,7 +101,7 @@ func (c *Client) Notify(err error, opts ...NoticeOptions) Result {
 	cfg := c.cfg
 	c.mu.RUnlock()
 
-	if cfg.ignoredEnvironment() {
+	if cfg.ignoredEnvironment() || !c.remoteEnabled(remoteErrors) {
 		return Result{Status: http.StatusAccepted}
 	}
 	notice := buildNotice(err, &cfg, o)
@@ -131,6 +132,9 @@ func (c *Client) NotifyTransaction(transaction Transaction) Result {
 	c.mu.RLock()
 	cfg := c.cfg
 	c.mu.RUnlock()
+	if cfg.APMEnabled && !c.remoteEnabled(remoteAPM) {
+		return Result{Status: http.StatusNoContent}
+	}
 	if !cfg.APMEnabled || cfg.APMSampleRate <= 0 || (cfg.APMSampleRate < 1 && rand.Float64() >= cfg.APMSampleRate) {
 		return Result{Status: http.StatusNoContent}
 	}
@@ -154,7 +158,7 @@ func (c *Client) NotifyLog(message, level, source string) Result {
 	c.mu.RLock()
 	cfg := c.cfg
 	c.mu.RUnlock()
-	if !cfg.LogsEnabled {
+	if !cfg.LogsEnabled || !c.remoteEnabled(remoteLogs) {
 		return Result{Status: http.StatusNoContent}
 	}
 	payload := LogEntry{
@@ -218,6 +222,9 @@ func (c *Client) Close(ctx context.Context) error {
 	var err error
 	c.stopOnce.Do(func() {
 		c.closed.Store(true)
+		if c.remote.stop != nil {
+			close(c.remote.stop)
+		}
 		close(c.queue)
 		done := make(chan struct{})
 		go func() { c.wg.Wait(); close(done) }()

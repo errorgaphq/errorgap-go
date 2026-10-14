@@ -53,6 +53,12 @@ type Config struct {
 	// Defaults to $ERRORGAP_IGNORE_ENVIRONMENTS (comma-separated).
 	IgnoreEnvironments []string
 
+	// DisableRemoteSettings makes the client ignore the project's switches in
+	// errorgap (Project settings › What SDKs send). By default the client
+	// stops sending errors, transactions or logs when they are switched off
+	// there. Also set by ERRORGAP_REMOTE_SETTINGS=false.
+	DisableRemoteSettings bool
+
 	// BeforeNotify sees each notice before it is sent and may change it.
 	// Return false to drop the notice.
 	BeforeNotify func(notice *Notice) bool
@@ -120,6 +126,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Environment == "" {
 		c.Environment = firstNonEmpty(os.Getenv("ERRORGAP_ENVIRONMENT"), "production")
+	}
+	if value, ok := os.LookupEnv("ERRORGAP_REMOTE_SETTINGS"); ok && !parseBool(value, true) {
+		c.DisableRemoteSettings = true
 	}
 	if c.Release == "" {
 		c.Release = detectRelease()
