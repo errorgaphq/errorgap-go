@@ -53,6 +53,12 @@ func (i *Ingestor) Requests() []CapturedRequest {
 func (i *Ingestor) Close() { i.Server.Close() }
 
 func (i *Ingestor) handle(w http.ResponseWriter, r *http.Request) {
+	// The SDK's settings poll is not an ingest request: no settings here,
+	// and nothing recorded.
+	if r.Method == http.MethodGet {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	raw, _ := io.ReadAll(r.Body)
 	var body map[string]any
 	_ = json.Unmarshal(raw, &body)

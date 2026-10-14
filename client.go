@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,12 +38,31 @@ type Client struct {
 	wg       sync.WaitGroup
 	stopOnce sync.Once
 	inFlight atomic.Int64
+	closed   atomic.Bool
+	backlog  atomic.Int64
+	// pausedUntil is a unix-nano time: sending is paused until then after a
+	// 429 or 503 (Retry-After).
+	pausedUntil atomic.Int64
+	remote      remoteSettings
 }
 
 type delivery struct {
 	resource string
 	payload  any
+	attempt  int
 }
+
+// ErrRateLimited is returned while delivery is paused at the server's
+// request.
+var ErrRateLimited = errors.New("errorgap: rate limited by the server, not sent")
+
+const (
+	maxAttempts       = 3
+	retryDelay        = 30 * time.Second
+	backlogSize       = 100
+	defaultRetryAfter = 60
+	maxRetryAfter     = 300
+)
 
 // NewClient validates the config, applies defaults, and starts the async
 // delivery goroutine. The caller should defer Close() to flush in-flight
@@ -79,7 +101,13 @@ func (c *Client) Notify(err error, opts ...NoticeOptions) Result {
 	cfg := c.cfg
 	c.mu.RUnlock()
 
+	if cfg.ignoredEnvironment() || !c.remoteEnabled(remoteErrors) {
+		return Result{Status: http.StatusAccepted}
+	}
 	notice := buildNotice(err, &cfg, o)
+	if cfg.BeforeNotify != nil && !runHook(&cfg, &notice) {
+		return Result{Status: http.StatusAccepted}
+	}
 	return c.submit(delivery{resource: "notices", payload: notice})
 }
 
@@ -104,6 +132,9 @@ func (c *Client) NotifyTransaction(transaction Transaction) Result {
 	c.mu.RLock()
 	cfg := c.cfg
 	c.mu.RUnlock()
+	if cfg.APMEnabled && !c.remoteEnabled(remoteAPM) {
+		return Result{Status: http.StatusNoContent}
+	}
 	if !cfg.APMEnabled || cfg.APMSampleRate <= 0 || (cfg.APMSampleRate < 1 && rand.Float64() >= cfg.APMSampleRate) {
 		return Result{Status: http.StatusNoContent}
 	}
@@ -127,7 +158,7 @@ func (c *Client) NotifyLog(message, level, source string) Result {
 	c.mu.RLock()
 	cfg := c.cfg
 	c.mu.RUnlock()
-	if !cfg.LogsEnabled {
+	if !cfg.LogsEnabled || !c.remoteEnabled(remoteLogs) {
 		return Result{Status: http.StatusNoContent}
 	}
 	payload := LogEntry{
@@ -141,8 +172,17 @@ func (c *Client) submit(item delivery) Result {
 	c.mu.RLock()
 	cfg := c.cfg
 	c.mu.RUnlock()
+	if cfg.ignoredEnvironment() {
+		return Result{Status: http.StatusNoContent}
+	}
+	if item.attempt == 0 {
+		item.attempt = 1
+	}
 	if !cfg.Async {
 		return c.deliver(context.Background(), item)
+	}
+	if c.closed.Load() {
+		return Result{Err: fmt.Errorf("errorgap: client closed")}
 	}
 	c.inFlight.Add(1)
 	select {
@@ -181,6 +221,10 @@ func (c *Client) Flush(ctx context.Context) error {
 func (c *Client) Close(ctx context.Context) error {
 	var err error
 	c.stopOnce.Do(func() {
+		c.closed.Store(true)
+		if c.remote.stop != nil {
+			close(c.remote.stop)
+		}
 		close(c.queue)
 		done := make(chan struct{})
 		go func() { c.wg.Wait(); close(done) }()
@@ -196,13 +240,115 @@ func (c *Client) Close(ctx context.Context) error {
 func (c *Client) loop() {
 	defer c.wg.Done()
 	for item := range c.queue {
-		c.deliver(context.Background(), item)
+		result := c.deliver(context.Background(), item)
+		if retryable(result) {
+			c.retryLater(item)
+		}
 		c.inFlight.Add(-1)
 	}
 }
 
+// runHook calls BeforeNotify. A hook that panics is logged and skipped: a
+// bug in a filter must not lose the error it was filtering.
+func runHook(cfg *Config, notice *Notice) (keep bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			cfg.Logger.Warn("errorgap: BeforeNotify panicked", "panic", recovered)
+			keep = true
+		}
+	}()
+	return cfg.BeforeNotify(notice)
+}
+
+// retryable reports whether a failed delivery is worth another try: network
+// failures and 5xx responses are. A 4xx is not (the server understood and
+// refused), and after a 429 the payload is dropped so a limited project is
+// not sent the same burst again.
+func retryable(result Result) bool {
+	if errors.Is(result.Err, ErrRateLimited) {
+		return false
+	}
+	if result.Err != nil {
+		return true
+	}
+	return result.Status >= 500
+}
+
+func (c *Client) retryLater(item delivery) {
+	if item.attempt >= maxAttempts || c.backlog.Load() >= backlogSize || c.closed.Load() {
+		return
+	}
+	c.backlog.Add(1)
+	next := delivery{resource: item.resource, payload: item.payload, attempt: item.attempt + 1}
+	time.AfterFunc(retryDelay*time.Duration(item.attempt), func() {
+		c.backlog.Add(-1)
+		defer func() { _ = recover() }() // the queue may have been closed meanwhile
+		if c.closed.Load() {
+			return
+		}
+		c.inFlight.Add(1)
+		select {
+		case c.queue <- next:
+		default:
+			c.inFlight.Add(-1)
+		}
+	})
+}
+
+// Paused reports whether delivery is paused at the server's request.
+func (c *Client) Paused() bool {
+	return time.Now().UnixNano() < c.pausedUntil.Load()
+}
+
+func (c *Client) pauseFor(header string) {
+	seconds, err := strconv.Atoi(strings.TrimSpace(header))
+	if err != nil || seconds < 1 {
+		seconds = defaultRetryAfter
+	}
+	if seconds > maxRetryAfter {
+		seconds = maxRetryAfter
+	}
+	c.pausedUntil.Store(time.Now().Add(time.Duration(seconds) * time.Second).UnixNano())
+	c.cfg.Logger.Warn("errorgap: rate limited, pausing delivery", "seconds", seconds)
+}
+
+// encode marshals a payload. A notice holding a value encoding/json cannot
+// carry (a channel, a func, a cyclic struct) is sent with that map replaced
+// by its %v form rather than being lost.
+func encode(payload any) ([]byte, error) {
+	body, err := json.Marshal(payload)
+	if err == nil {
+		return body, nil
+	}
+	notice, ok := payload.(Notice)
+	if !ok {
+		return nil, err
+	}
+	for _, m := range []*map[string]any{&notice.Context, &notice.Environment, &notice.Session, &notice.Params} {
+		if _, mapErr := json.Marshal(*m); mapErr != nil {
+			*m = stringifyMap(*m)
+		}
+	}
+	return json.Marshal(notice)
+}
+
+func stringifyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		if _, err := json.Marshal(v); err != nil {
+			out[k] = truncateString(fmt.Sprintf("%v", v), maxStringLen)
+		} else {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func (c *Client) deliver(ctx context.Context, item delivery) Result {
-	body, err := json.Marshal(item.payload)
+	if c.Paused() {
+		return Result{Err: ErrRateLimited}
+	}
+	body, err := encode(item.payload)
 	if err != nil {
 		c.cfg.Logger.Warn("errorgap: failed to encode notice", "err", err)
 		return Result{Err: err}
@@ -227,6 +373,9 @@ func (c *Client) deliver(ctx context.Context, item delivery) Result {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		c.pauseFor(resp.Header.Get("Retry-After"))
+	}
 	respBody, _ := io.ReadAll(resp.Body)
 	return Result{Status: resp.StatusCode, Body: respBody}
 }

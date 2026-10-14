@@ -45,7 +45,23 @@ type Config struct {
 	Environment string
 
 	// Release is the application version embedded in the notice context.
+	// Defaults to $ERRORGAP_RELEASE, the hosting platform's commit variable,
+	// or the VCS revision stamped into the binary by `go build`.
 	Release string
+
+	// IgnoreEnvironments lists environments in which nothing is sent.
+	// Defaults to $ERRORGAP_IGNORE_ENVIRONMENTS (comma-separated).
+	IgnoreEnvironments []string
+
+	// DisableRemoteSettings makes the client ignore the project's switches in
+	// errorgap (Project settings › What SDKs send). By default the client
+	// stops sending errors, transactions or logs when they are switched off
+	// there. Also set by ERRORGAP_REMOTE_SETTINGS=false.
+	DisableRemoteSettings bool
+
+	// BeforeNotify sees each notice before it is sent and may change it.
+	// Return false to drop the notice.
+	BeforeNotify func(notice *Notice) bool
 
 	// RootDirectory is used to classify application frames and make their
 	// filenames relative. Defaults to $ERRORGAP_ROOT_DIRECTORY or the current
@@ -110,6 +126,19 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Environment == "" {
 		c.Environment = firstNonEmpty(os.Getenv("ERRORGAP_ENVIRONMENT"), "production")
+	}
+	if value, ok := os.LookupEnv("ERRORGAP_REMOTE_SETTINGS"); ok && !parseBool(value, true) {
+		c.DisableRemoteSettings = true
+	}
+	if c.Release == "" {
+		c.Release = detectRelease()
+	}
+	if c.IgnoreEnvironments == nil {
+		for _, name := range strings.Split(os.Getenv("ERRORGAP_IGNORE_ENVIRONMENTS"), ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				c.IgnoreEnvironments = append(c.IgnoreEnvironments, name)
+			}
+		}
 	}
 	if c.RootDirectory == "" {
 		c.RootDirectory = os.Getenv("ERRORGAP_ROOT_DIRECTORY")
@@ -176,6 +205,15 @@ func parseLogLevel(value string) slog.Level {
 		return level
 	}
 	return slog.LevelWarn
+}
+
+func (c *Config) ignoredEnvironment() bool {
+	for _, name := range c.IgnoreEnvironments {
+		if name == c.Environment {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Config) validate() error {

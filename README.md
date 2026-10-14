@@ -60,6 +60,31 @@ if err := risky(); err != nil {
 `Notify` returns a `Result` (`{Status, Body, Err, Queued}`). The SDK never
 panics — recoverable failures are logged via the configured `slog.Logger`.
 
+## Filtering, hooks and delivery
+
+```go
+errorgap.Init(errorgap.Config{
+    ProjectSlug:        "my-app",
+    IgnoreEnvironments: []string{"test"},
+    BeforeNotify: func(n *errorgap.Notice) bool {
+        if n.Errors[0].Type == "NotFoundError" {
+            return false // drop it
+        }
+        n.Context["team"] = "billing" // or change it
+        return true
+    },
+})
+```
+
+`FilterKeys` are masked at any depth in `Params` and `Session`, inside slices
+too, and oversized values are cut. Errors wrapped with `%w` are reported with
+their chain (`context.causes`). A send that fails on the network or with a 5xx
+is retried up to three times; after a 429 the client stops sending for the
+server's `Retry-After` (`client.Paused()`).
+
+With `Release` empty it is read from `ERRORGAP_RELEASE`, the hosting platform's
+commit variable, or the VCS revision `go build` stamps into the binary.
+
 ## net/http errors and APM
 
 ```go
@@ -87,6 +112,52 @@ errorgap.RecordExternal(r.Context(), time.Since(started))
 ```
 
 SQL literals are normalized before delivery so equivalent queries aggregate.
+
+## Remote settings
+
+Errors, transactions and logs can each be switched off for a project in
+errorgap (Project settings › What SDKs send). Running apps follow within ten
+minutes, with no deploy: the client re-reads `GET /api/projects/:slug/config`
+in the background. If errorgap cannot be reached, everything stays on.
+`DisableRemoteSettings: true` (or `ERRORGAP_REMOTE_SETTINGS=false`) ignores the
+project's switches.
+
+## Gin, Echo and other routers
+
+Gin and Echo have their own modules, so the core module stays free of
+dependencies:
+
+```go
+import errorgapgin "github.com/errorgaphq/errorgap-go/gin"
+
+r := gin.New()
+r.Use(gin.Recovery(), errorgapgin.Middleware())
+```
+
+```go
+import errorgapecho "github.com/errorgaphq/errorgap-go/echo"
+
+e := echo.New()
+e.Use(middleware.Recover(), errorgapecho.Middleware())
+```
+
+Both report panics and 5xx handler errors, and record each request as a
+transaction named by its route (`/orders/:id`). Register them after the
+framework's own recovery middleware.
+
+chi, gorilla/mux, httprouter and anything else built on `net/http` work with
+`stdhttp.Recover`; name the route with `stdhttp.SetRoute` where the router
+knows it:
+
+```go
+r.Use(stdhttp.Recover)
+r.Use(func(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+        next.ServeHTTP(w, req)
+        stdhttp.SetRoute(req, chi.RouteContext(req.Context()).RoutePattern())
+    })
+})
+```
 
 ## Background jobs
 
@@ -188,6 +259,11 @@ curl -sS -X POST "$ERRORGAP_ENDPOINT/api/projects/$ERRORGAP_PROJECT_SLUG/notices
 ```
 
 Then trigger a real error and confirm it appears in the Errorgap UI.
+
+## Releasing
+
+The adapters are nested modules and are tagged separately, after the core:
+`v0.5.0`, then `gin/v0.5.0` and `echo/v0.5.0`.
 
 ## Development
 

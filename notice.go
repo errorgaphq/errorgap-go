@@ -1,8 +1,14 @@
 package errorgap
 
 import (
+	"errors"
 	"reflect"
 	"time"
+)
+
+const (
+	maxCauseDepth    = 10
+	maxMessageLength = 8192
 )
 
 // ErrorEntry is one entry in the notice's errors array.
@@ -53,7 +59,10 @@ func buildNotice(err error, cfg *Config, opts NoticeOptions) Notice {
 	if cfg.RootDirectory != "" {
 		context["root_directory"] = cfg.RootDirectory
 	}
-	for k, v := range opts.Context {
+	if causes := errorCauses(err); len(causes) > 0 {
+		context["causes"] = causes
+	}
+	for k, v := range cleanMap(opts.Context) {
 		context[k] = v
 	}
 	if _, set := context["transaction_id"]; !set && opts.TransactionID != "" {
@@ -65,14 +74,27 @@ func buildNotice(err error, cfg *Config, opts NoticeOptions) Notice {
 		ReceivedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		Errors: []ErrorEntry{{
 			Type:      errorType(err),
-			Message:   err.Error(),
+			Message:   truncateString(err.Error(), maxMessageLength),
 			Backtrace: frames,
 		}},
 		Context:     context,
-		Environment: nonNilMap(opts.Environment),
-		Session:     nonNilMap(opts.Session),
+		Environment: cleanMap(opts.Environment),
+		Session:     FilterParams(opts.Session, cfg.FilterKeys),
 		Params:      FilterParams(opts.Params, cfg.FilterKeys),
 	}
+}
+
+// errorCauses walks errors.Unwrap (the %w chain) and returns the type and
+// message of each wrapped error, nearest first.
+func errorCauses(err error) []map[string]string {
+	var causes []map[string]string
+	for current := errors.Unwrap(err); current != nil && len(causes) < maxCauseDepth; current = errors.Unwrap(current) {
+		causes = append(causes, map[string]string{
+			"type":    errorType(current),
+			"message": truncateString(current.Error(), maxMessageLength),
+		})
+	}
+	return causes
 }
 
 func errorType(err error) string {
@@ -87,11 +109,4 @@ func errorType(err error) string {
 		return "error"
 	}
 	return t.Name()
-}
-
-func nonNilMap(m map[string]any) map[string]any {
-	if m == nil {
-		return map[string]any{}
-	}
-	return m
 }
